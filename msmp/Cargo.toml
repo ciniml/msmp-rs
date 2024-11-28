@@ -1,0 +1,20 @@
+[package]
+name = "msmp"
+version = "0.1.0"
+edition = "2021"
+authors = ["Kenta Ida <fuga@fugafuga.org>"]
+license = "MIT"
+
+[features]
+default = []
+std = []
+async = []
+tokio = ["dep:tokio"]
+
+[dependencies]
+nb = "1.1.0"
+tokio = { version = "1.41.1", features = ["macros", "rt", "test-util"], optional = true}
+
+[dev-dependencies]
+futures = "0.3.31"
+tokio = { version = "1.41.1", features = ["macros", "rt", "test-util"] }

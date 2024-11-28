@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en-US">
+  <head>
+    <meta charset="utf-8" />
+    <title>MSMP Server</title>
+  </head>
+  <body>
+    <script type="module">
+      import init, { start, run_service } from "./pkg/msmp_web.js";
+      await init();
+      start();
+
+      const errorMessageField = document.querySelector('#error_message');
+      function showError(message) {
+        errorMessageField.textContent = message;
+      }
+      function clearError() {
+        errorMessageField.textContent = '';
+      }
+      const resultMessageField = document.querySelector('#result_message');
+      function showResult(message) {
+        resultMessageField.textContent = message;
+      }
+      function clearResult() {
+        resultMessageField.textContent = '';
+      }
+      const baudRateField = document.querySelector('#baud_rate');
+
+      const selectSerialButton = document.querySelector('#select_serial');
+      let port = undefined;
+      async function openPort() {
+        if( port ){
+          try {
+            await port.close();
+          }
+          catch(e) {
+          }
+          const baudRate = parseInt(baudRateField.value);
+          await port.open({ baudRate: baudRate });
+        }
+      }
+      selectSerialButton.addEventListener('click', async () => {
+        port = await navigator.serial.requestPort();
+        selectSerialButton.disabled = true;
+      });
+      const runServiceButton = document.querySelector('#run_service');
+      runServiceButton.addEventListener('click', async () => {
+        try {
+          clearError();
+          runServiceButton.disabled = true;
+          runServiceButton.textContent = 'Running...';
+          if (port) {
+            await openPort();
+            const ids = await run_service(port, (target, value) => {
+              if( target === "MNP004" ) {
+                const lamp = document.querySelector('#mnp004_lamp');
+                lamp.checked = value;
+              } else if( target === "ComProc MCU") {
+                const message = document.querySelector('#comproc_message');
+                message.textContent = value;
+              } else {
+                showResult(`Unknown target - ${target}: ${value}`);
+              }
+            });
+          }
+        }
+        catch(e) {
+          showError(e);
+        }
+        finally {
+          runServiceButton.textContent = 'Run Service';
+          runServiceButton.disabled = false;
+        }
+      });
+    </script>
+
+    <div>
+      <button id="select_serial">Select Serial Port</button>
+      <span>Baud rate:</span><input type="number" id="baud_rate" value="9600" min="1200" max="1000000" />
+    </div>
+    <div>
+      <button id="run_service">Run Service</button>
+    </div>
+    <div>
+      <label>MNP004 Emulation</label><br/>
+      <span>Lamp: </span><input type="checkbox" id="mnp004_lamp" />
+    </div>
+    <div>
+      <label>ComProc Emulation</label><br/>
+      <span>Message: </span><span id="comproc_message"></span>
+    </div>
+    <div id="result_message" style="color: green"></div>
+    <div id="error_message" style="color: red"></div>
+  </body>
+</html>

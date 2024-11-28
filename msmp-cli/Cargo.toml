@@ -1,0 +1,17 @@
+[package]
+name = "msmp-cli"
+version = "0.1.0"
+edition = "2021"
+authors = ["Kenta Ida <fuga@fugafuga.org>"]
+license = "MIT"
+
+[dependencies]
+clap = { version = "4.5.4", features = ["derive"] }
+clap-num = "1.1.1"
+env_logger = "0.11.3"
+hex = "0.4.3"
+indicatif = "0.17.8"
+log = { version = "0.4.21", features = ["std"] }
+nb = "1.1.0"
+msmp = { path = "../msmp", features = ["std", "async"] }
+serialport = "4.3.0"
