@@ -5,7 +5,7 @@ use clap_num::maybe_hex;
 use futures_util::{SinkExt, StreamExt};
 use tokio_serial::{SerialPort, SerialPortBuilderExt, SerialStream};
 
-use msmp::{packet::Address, protocol::StreamWriterAsync};
+use msmp::{packet::Address, protocol::{StreamReaderAsync, StreamWriterAsync}, service::{BufferPool, Service}};
 use tokio_util::codec::{BytesCodec, Decoder, Framed};
 
 
@@ -19,8 +19,10 @@ struct Cli {
     port: String,
     #[clap(short, long, help = "The baud rate to use", default_value = "9600")]
     baud: u32,
-    #[clap(short, long, help = "The timeout in milliseconds every ID", default_value = "10")]
+    #[clap(short, long, help = "The timeout in milliseconds", default_value = "10")]
     timeout_ms: u32,
+    #[clap(short, long, help = "The interval to send a next byte in milliseconds", default_value = "20")]
+    send_interval: u64,
 }
 
 #[derive(Debug, Subcommand)]
@@ -46,6 +48,7 @@ struct ServeCommandArgs {}
 struct SerialWrapper {
     last_read_buffer: std::rc::Rc<std::cell::RefCell<Option<bytes::BytesMut>>>,
     serial: std::rc::Rc<std::cell::RefCell<Framed<SerialStream, BytesCodec>>>,
+    write_interval: std::time::Duration,
 }
 
 // StreamReadAsync implementation for SerialReader
@@ -54,9 +57,8 @@ impl msmp::protocol::StreamReaderAsync for SerialWrapper {
     async fn read(&mut self, data: &mut [u8]) -> Result<usize, Self::Error> {
         let mut last_read_buffer = self.last_read_buffer.borrow_mut();
         if let Some(buffer) = last_read_buffer.as_mut() {
-            let bytes_to_read = std::cmp::min(data.len(), buffer.remaining_mut());
+            let bytes_to_read = std::cmp::min(data.len(), buffer.remaining());
             buffer.copy_to_slice(&mut data[..bytes_to_read]);
-            buffer.advance(bytes_to_read);
             if buffer.remaining() == 0 {
                 *last_read_buffer = None;
             }
@@ -65,10 +67,9 @@ impl msmp::protocol::StreamReaderAsync for SerialWrapper {
             match self.serial.borrow_mut().next().await {
                 None => Ok(0),
                 Some(Ok(mut buffer)) => {
-                    let bytes_to_read = std::cmp::min(data.len(), buffer.remaining_mut());
+                    let bytes_to_read = std::cmp::min(data.len(), buffer.remaining());
                     buffer.copy_to_slice(&mut data[..bytes_to_read]);
-                    buffer.advance(bytes_to_read);
-                    if buffer.remaining() == 0 {
+                    if buffer.remaining() != 0 {
                         *last_read_buffer = Some(buffer);
                     }
                     Ok(bytes_to_read)
@@ -85,7 +86,14 @@ impl msmp::protocol::StreamReaderAsync for SerialWrapper {
 impl msmp::protocol::StreamWriterAsync for SerialWrapper {
     type Error = tokio_serial::Error;
     async fn write(&mut self, data: &[u8]) -> Result<usize, Self::Error> {
-        self.serial.borrow_mut().send(bytes::BytesMut::from(data)).await?;
+        if self.write_interval == std::time::Duration::ZERO {
+            self.serial.borrow_mut().send(bytes::BytesMut::from(data)).await?;
+        } else {
+            for byte in data {
+                self.serial.borrow_mut().send(bytes::BytesMut::from(&[*byte][..])).await?;
+                tokio::time::sleep(self.write_interval).await;
+            }
+        }
         Ok(data.len())
     }
 }
@@ -113,6 +121,53 @@ async fn command_send(args: SendCommandArgs, mut writer: SerialWrapper) -> anyho
     Ok(())
 }
 
+async fn command_serve(_args: ServeCommandArgs, mut reader: SerialWrapper, mut writer: SerialWrapper) -> anyhow::Result<()> {
+    static BUFFER_POOL: BufferPool<64, 256> = BufferPool::new();
+    let mut service = Service::new(&BUFFER_POOL);
+    log::info!("Running service...");
+    let mut buffer = [0u8; 64];
+
+    loop {
+        let bytes_read = reader.read(&mut buffer).await?;
+        if bytes_read > 0 {
+            log::debug!("received: {:?}", &buffer[..bytes_read]);
+        }
+        service.put_received_data(&buffer[..bytes_read]).map_err(|e| anyhow!("{e:?}"))?;
+        while service.process(&mut writer, |manager, packet| {
+            log::info!("Packet received: {}", &packet);
+            match packet.destination_address().value() {
+                0x4 => {    //MNP004
+                    log::info!("MNP004 packet received");
+                    if packet.message_length() == 1 {
+                        if let Ok(body) = packet.body() {
+                            let lamp_state = body[0] as char;
+                            log::info!("MNP004 lamp state: {}", lamp_state);
+                            match lamp_state {
+                                lamp_state @ 'H' => { log::info!("MNP004 lamp state to {}", lamp_state); },
+                                lamp_state @ 'L' => { log::info!("MNP004 lamp state to {}", lamp_state); },
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+                0x5 => {    //ComProc MCU
+                    log::info!("ComProc MCU packet received");
+                    if let Ok(body) = packet.body() {
+                        if body.len() > 3 {
+                            if let Ok(message) = core::str::from_utf8(&body[3..]) {
+                                log::info!("ComProc MCU message: {}", message);
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+            packet.destination_address().value() != 0xe
+        }).await.map_err(|e| anyhow!("{e:?}"))? {}
+    }
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() {
     env_logger::builder()
@@ -127,13 +182,16 @@ async fn main() {
     let framed = tokio_util::codec::BytesCodec::new().framed(serial);
     let serial = std::rc::Rc::new(std::cell::RefCell::new(framed));
 
-    
-    let reader = SerialWrapper { serial, last_read_buffer: std::rc::Rc::new(std::cell::RefCell::new(None)) };
+    let write_interval = std::time::Duration::from_millis(cli.send_interval);
+    let reader = SerialWrapper { serial, last_read_buffer: std::rc::Rc::new(std::cell::RefCell::new(None)), write_interval };
     let writer = reader.clone();
     
     let result = match cli.subcommand {
         SubCommands::Send(args) => {
             command_send(args, writer).await
+        }
+        SubCommands::Serve(args) => {
+            command_serve(args, reader, writer).await
         }
         _ => unimplemented!(),
     };
