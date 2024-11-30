@@ -15,3 +15,6 @@ log = { version = "0.4.21", features = ["std"] }
 nb = "1.1.0"
 msmp = { path = "../msmp", features = ["std", "async"] }
 serialport = "4.3.0"
+tokio = { version = "1.41.1", features = ["full"] }
+anyhow = { version = "1.0.93", features = ["backtrace"] }
+tokio-serial = "5.4.4"

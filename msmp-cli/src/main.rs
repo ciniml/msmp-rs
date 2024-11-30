@@ -1,8 +1,9 @@
 use std::io::Write;
+use anyhow::anyhow;
+use clap::{Args, Parser, Subcommand};
+use tokio_serial::{SerialPort, SerialPortBuilderExt, SerialStream};
 
-use clap::{Parser, Subcommand};
-use indicatif::{ProgressBar, ProgressStyle};
-use msmp::{packet::Address, protocol::StreamWriter, service::Service};
+use msmp::packet::Address;
 
 
 #[derive(Debug, Parser)]
@@ -21,15 +22,22 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum SubCommands {
-    Send {
-        #[clap(long, help = "Source address", value_parser = clap_num::maybe_hex::<u8>)]
-        source_address: u8,
-        #[clap(long, help = "Destination address", value_parser = clap_num::maybe_hex::<u8>)]
-        destination_address: u8,
-        #[clap(long, help = "Data to send")]
-        data: String,
-    },
+    Send(SendCommandArgs),
+    Serve(ServeCommandArgs),
 }
+
+#[derive(Debug, Args)]
+struct SendCommandArgs {
+    #[clap(help = "The source address to use")]
+    source_address: u8,
+    #[clap(help = "The destination address to use")]
+    destination_address: u8,
+    #[clap(help = "The data to send")]
+    data: String,
+}
+
+#[derive(Debug, Args)]
+struct ServeCommandArgs {}
 
 struct SerialReader<'a> {
     serial: &'a std::cell::RefCell<Box<dyn serialport::SerialPort>>
@@ -50,7 +58,40 @@ impl<'a> msmp::protocol::StreamWriter for SerialWriter<'a> {
     }
 }
 
-fn main() {
+// StreamWriterAsync implementation for SerialWriter
+#[async_trait::async_trait]
+impl<'a> msmp::protocol::StreamWriterAsync for SerialWriter<'a> {
+    type Error = serialport::Error;
+    async fn write(&mut self, data: &[u8]) -> nb::Result<usize, Self::Error> {
+        self.serial.borrow_mut().write_async
+    }
+}
+
+
+async fn command_send(args: SendCommandArgs, writer: SerialWriter<'_>) -> anyhow::Result<()> {
+    let source_address = Address::try_from(args.source_address).map_err(|_| anyhow!("Invalid source address"))?;
+    let destination_address = Address::try_from(args.destination_address).map_err(|_| anyhow!("Invalid destination address"))?;
+    let data_binary = hex::decode(args.data).expect("Failed to decode hex");
+    let mut packet_buffer = Vec::new();
+    packet_buffer.resize(data_binary.len() + 2, 0);
+    let mut packet_writer = msmp::packet::PacketWriter::new(&mut packet_buffer);
+    packet_writer.set_source_address(source_address).map_err(|_| anyhow!("Failed to set source address"))?;
+    packet_writer.set_destination_address(destination_address).map_err(|_| anyhow!("Failed to set destination address"))?;
+    packet_writer.set_message_length(data_binary.len()).map_err(|_| anyhow!("Failed to set message length"))?;
+    packet_writer.set_message_type(msmp::packet::MessageType::Normal).map_err(|_| anyhow!("Failed to set message type"))?;
+    packet_writer.body_mut().copy_from_slice(&data_binary);
+    drop(packet_writer);
+    
+    let mut bytes_written = 0;
+    while bytes_written < packet_buffer.len() {
+        let bytes_written_now = writer.write(&packet_buffer[bytes_written..]).map_err(|err| anyhow!("Failed to write to serial port: {:?}", err))?;
+        bytes_written += bytes_written_now;
+    }
+    Ok(())
+}
+
+#[tokio::main]
+async fn main() {
     env_logger::builder()
         .filter_level(log::LevelFilter::Info)
         .init();
@@ -64,27 +105,13 @@ fn main() {
     let mut reader = SerialReader { serial: &serial };
     let mut writer = SerialWriter { serial: &serial };
     
-    match cli.subcommand {
-        SubCommands::Send { source_address, destination_address, data } => {
-            let source_address = Address::try_from(source_address).expect("Invalid source address");
-            let destination_address = Address::try_from(destination_address).expect("Invalid destination address");
-            let data_binary = hex::decode(data).expect("Failed to decode hex");
-            let mut packet_buffer = Vec::new();
-            packet_buffer.resize(data_binary.len() + 2, 0);
-            let mut packet_writer = msmp::packet::PacketWriter::new(&mut packet_buffer);
-            packet_writer.set_source_address(source_address).expect("Failed to set source address");
-            packet_writer.set_destination_address(destination_address).expect("Failed to set destination address");
-            packet_writer.set_message_length(data_binary.len()).expect("Failed to set message length");
-            packet_writer.set_message_type(msmp::packet::MessageType::Normal).expect("Failed to set message type");
-            packet_writer.body_mut().copy_from_slice(&data_binary);
-            drop(packet_writer);
-            
-            let mut bytes_written = 0;
-            while bytes_written < packet_buffer.len() {
-                let bytes_written_now = writer.write(&packet_buffer[bytes_written..]).expect("Failed to write");
-                bytes_written += bytes_written_now;
-            }
+    let result = match cli.subcommand {
+        SubCommands::Send(args) => {
+            command_send(args, writer).await
         }
         _ => unimplemented!(),
+    };
+    if let Err(err) = result {
+        log::error!("Error: {:?}", err);
     }
 }
