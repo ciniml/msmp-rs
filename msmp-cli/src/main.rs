@@ -1,9 +1,12 @@
-use std::io::Write;
 use anyhow::anyhow;
+use bytes::{Buf, BufMut};
 use clap::{Args, Parser, Subcommand};
+use clap_num::maybe_hex;
+use futures_util::{SinkExt, StreamExt};
 use tokio_serial::{SerialPort, SerialPortBuilderExt, SerialStream};
 
-use msmp::packet::Address;
+use msmp::{packet::Address, protocol::StreamWriterAsync};
+use tokio_util::codec::{BytesCodec, Decoder, Framed};
 
 
 #[derive(Debug, Parser)]
@@ -28,9 +31,9 @@ enum SubCommands {
 
 #[derive(Debug, Args)]
 struct SendCommandArgs {
-    #[clap(help = "The source address to use")]
+    #[clap(help = "The source address to use", value_parser=maybe_hex::<u8>)]
     source_address: u8,
-    #[clap(help = "The destination address to use")]
+    #[clap(help = "The destination address to use", value_parser=maybe_hex::<u8>)]
     destination_address: u8,
     #[clap(help = "The data to send")]
     data: String,
@@ -39,36 +42,56 @@ struct SendCommandArgs {
 #[derive(Debug, Args)]
 struct ServeCommandArgs {}
 
-struct SerialReader<'a> {
-    serial: &'a std::cell::RefCell<Box<dyn serialport::SerialPort>>
+#[derive(Clone)]
+struct SerialWrapper {
+    last_read_buffer: std::rc::Rc<std::cell::RefCell<Option<bytes::BytesMut>>>,
+    serial: std::rc::Rc<std::cell::RefCell<Framed<SerialStream, BytesCodec>>>,
 }
-struct SerialWriter<'a> {
-    serial: &'a std::cell::RefCell<Box<dyn serialport::SerialPort>>,
-}
-impl<'a> msmp::protocol::StreamReader for SerialReader<'a> {
-    type Error = serialport::Error;
-    fn read(&mut self, data: &mut [u8]) -> nb::Result<usize, Self::Error> {
-        self.serial.borrow_mut().read(data).map_err(|err| nb::Error::Other(serialport::Error::from(err)))
-    }
-}
-impl<'a> msmp::protocol::StreamWriter for SerialWriter<'a> {
-    type Error = serialport::Error;
-    fn write(&mut self, data: &[u8]) -> nb::Result<usize, Self::Error> {
-        self.serial.borrow_mut().write(data).map_err(|err| nb::Error::Other(serialport::Error::from(err)))
+
+// StreamReadAsync implementation for SerialReader
+impl msmp::protocol::StreamReaderAsync for SerialWrapper {
+    type Error = tokio_serial::Error;
+    async fn read(&mut self, data: &mut [u8]) -> Result<usize, Self::Error> {
+        let mut last_read_buffer = self.last_read_buffer.borrow_mut();
+        if let Some(buffer) = last_read_buffer.as_mut() {
+            let bytes_to_read = std::cmp::min(data.len(), buffer.remaining_mut());
+            buffer.copy_to_slice(&mut data[..bytes_to_read]);
+            buffer.advance(bytes_to_read);
+            if buffer.remaining() == 0 {
+                *last_read_buffer = None;
+            }
+            Ok(bytes_to_read)
+        } else {
+            match self.serial.borrow_mut().next().await {
+                None => Ok(0),
+                Some(Ok(mut buffer)) => {
+                    let bytes_to_read = std::cmp::min(data.len(), buffer.remaining_mut());
+                    buffer.copy_to_slice(&mut data[..bytes_to_read]);
+                    buffer.advance(bytes_to_read);
+                    if buffer.remaining() == 0 {
+                        *last_read_buffer = Some(buffer);
+                    }
+                    Ok(bytes_to_read)
+                },
+                Some(Err(err)) => {
+                    Err(err.into())
+                }
+            }
+        }
     }
 }
 
 // StreamWriterAsync implementation for SerialWriter
-#[async_trait::async_trait]
-impl<'a> msmp::protocol::StreamWriterAsync for SerialWriter<'a> {
-    type Error = serialport::Error;
-    async fn write(&mut self, data: &[u8]) -> nb::Result<usize, Self::Error> {
-        self.serial.borrow_mut().write_async
+impl msmp::protocol::StreamWriterAsync for SerialWrapper {
+    type Error = tokio_serial::Error;
+    async fn write(&mut self, data: &[u8]) -> Result<usize, Self::Error> {
+        self.serial.borrow_mut().send(bytes::BytesMut::from(data)).await?;
+        Ok(data.len())
     }
 }
 
 
-async fn command_send(args: SendCommandArgs, writer: SerialWriter<'_>) -> anyhow::Result<()> {
+async fn command_send(args: SendCommandArgs, mut writer: SerialWrapper) -> anyhow::Result<()> {
     let source_address = Address::try_from(args.source_address).map_err(|_| anyhow!("Invalid source address"))?;
     let destination_address = Address::try_from(args.destination_address).map_err(|_| anyhow!("Invalid destination address"))?;
     let data_binary = hex::decode(args.data).expect("Failed to decode hex");
@@ -84,7 +107,7 @@ async fn command_send(args: SendCommandArgs, writer: SerialWriter<'_>) -> anyhow
     
     let mut bytes_written = 0;
     while bytes_written < packet_buffer.len() {
-        let bytes_written_now = writer.write(&packet_buffer[bytes_written..]).map_err(|err| anyhow!("Failed to write to serial port: {:?}", err))?;
+        let bytes_written_now = writer.write(&packet_buffer[bytes_written..]).await.map_err(|err| anyhow!("Failed to write to serial port: {:?}", err))?;
         bytes_written += bytes_written_now;
     }
     Ok(())
@@ -97,13 +120,16 @@ async fn main() {
         .init();
     let cli = Cli::parse();
 
-    let serial = serialport::new(&cli.port, cli.baud)
-        .open()
+    let mut serial = tokio_serial::new(&cli.port, cli.baud)
+        .open_native_async()
         .expect("Failed to open serial port");
-    let serial = std::cell::RefCell::new(serial);
-    serial.borrow_mut().set_timeout(std::time::Duration::from_millis(cli.timeout_ms as u64)).expect("Failed to set timeout");
-    let mut reader = SerialReader { serial: &serial };
-    let mut writer = SerialWriter { serial: &serial };
+    serial.set_timeout(std::time::Duration::from_millis(cli.timeout_ms as u64)).expect("Failed to set timeout");
+    let framed = tokio_util::codec::BytesCodec::new().framed(serial);
+    let serial = std::rc::Rc::new(std::cell::RefCell::new(framed));
+
+    
+    let reader = SerialWrapper { serial, last_read_buffer: std::rc::Rc::new(std::cell::RefCell::new(None)) };
+    let writer = reader.clone();
     
     let result = match cli.subcommand {
         SubCommands::Send(args) => {

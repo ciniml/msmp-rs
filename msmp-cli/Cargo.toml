@@ -18,3 +18,7 @@ serialport = "4.3.0"
 tokio = { version = "1.41.1", features = ["full"] }
 anyhow = { version = "1.0.93", features = ["backtrace"] }
 tokio-serial = "5.4.4"
+tokio-util = { version = "0.7.12", features = ["codec"] }
+bytes = "1.9.0"
+futures-util = "0.3.31"
+async-trait = "0.1.83"
