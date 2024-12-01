@@ -39,6 +39,8 @@ struct SendCommandArgs {
     destination_address: u8,
     #[clap(help = "The data to send")]
     data: String,
+    #[clap(long, help = "Send sync byte before sending the frame.", default_value = "false")]
+    sync: bool,
 }
 
 #[derive(Debug, Args)]
@@ -112,7 +114,11 @@ async fn command_send(args: SendCommandArgs, mut writer: SerialWrapper) -> anyho
     packet_writer.set_message_type(msmp::packet::MessageType::Normal).map_err(|_| anyhow!("Failed to set message type"))?;
     packet_writer.body_mut().copy_from_slice(&data_binary);
     drop(packet_writer);
-    
+
+    if args.sync {
+        writer.write(&[0x00]).await.map_err(|err| anyhow!("Failed to write to serial port: {:?}", err))?;
+    }
+
     let mut bytes_written = 0;
     while bytes_written < packet_buffer.len() {
         let bytes_written_now = writer.write(&packet_buffer[bytes_written..]).await.map_err(|err| anyhow!("Failed to write to serial port: {:?}", err))?;
