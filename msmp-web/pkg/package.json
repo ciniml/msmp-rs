@@ -8,11 +8,13 @@
   "files": [
     "msmp_web_bg.wasm",
     "msmp_web.js",
+    "msmp_web_bg.js",
     "msmp_web.d.ts"
   ],
   "module": "msmp_web.js",
   "types": "msmp_web.d.ts",
   "sideEffects": [
+    "./msmp_web.js",
     "./snippets/*"
   ]
 }

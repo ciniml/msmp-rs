@@ -249,11 +249,12 @@ impl<const BUFFER_SIZE: usize, T: AsRef<[u8]> + AsMut<[u8]>> ProtocolReader<BUFF
         }
     }
 
-    pub fn packet(&self) -> Option<PacketReader> {
+    pub fn packet(&self) -> Result<Option<PacketReader>, ProtocolReaderError<()>> {
         if self.state == ReaderState::Completed {
-            Some(PacketReader::new(&self.buffer.as_ref()[0..self.position]))
+            Ok(Some(PacketReader::try_new(&self.buffer.as_ref()[0..self.position])
+                .map_err(ProtocolReaderError::PacketError)?))
         } else {
-            None
+            Ok(None)
         }
     }
 }
@@ -436,6 +437,7 @@ mod test_std {
 
         let packet = reader
             .packet()
+            .expect("packet() must success")
             .expect("packet() must return Some after reading a packet");
         assert_eq!(packet.body().unwrap(), &[0xde, 0xad, 0xbe, 0xef]);
         assert_eq!(packet.source_address().value(), 0x02);
@@ -457,6 +459,7 @@ mod test_std {
 
         let packet = reader
             .packet()
+            .expect("packet() must success")
             .expect("packet() must return Some after reading a packet");
         assert_eq!(packet.body().unwrap(), &[0xde, 0xad, 0xbe, 0xef]);
         assert_eq!(packet.source_address().value(), 0x02);
@@ -480,6 +483,7 @@ mod test_std {
 
         let packet = reader
             .packet()
+            .expect("packet() must success")
             .expect("packet() must return Some after reading a packet");
         assert_eq!(packet.body().unwrap(), &[0xde, 0xad, 0xbe, 0xef]);
         assert_eq!(packet.source_address().value(), 0x02);
@@ -534,7 +538,9 @@ mod test_std {
         let result = reader.read(&mut stream);
         assert!(result.unwrap());
 
-        let packet = reader.packet().unwrap();
+        let packet = reader.packet()
+            .expect("packet() must success")
+            .expect("packet() must return Some after reading a packet");
         assert_eq!(packet.body().unwrap(), &[0xde, 0xad, 0xbe, 0xef]);
         assert_eq!(packet.source_address().value(), 0x02);
         assert_eq!(packet.destination_address().value(), 0x01);
@@ -561,7 +567,9 @@ mod test_std {
         let result = reader.read_async(&mut rx).await;
         assert!(result.unwrap());
 
-        let packet = reader.packet().unwrap();
+        let packet = reader.packet()
+            .expect("packet() must success")
+            .expect("packet() must return Some after reading a packet");
         assert_eq!(packet.body().unwrap(), &[0xde, 0xad, 0xbe, 0xef]);
         assert_eq!(packet.source_address().value(), 0x02);
         assert_eq!(packet.destination_address().value(), 0x01);
@@ -583,6 +591,7 @@ mod test_std {
 
         let packet = reader
             .packet()
+            .expect("packet() must success")
             .expect("packet() must return Some after reading a packet");
         assert_eq!(packet.body().unwrap(), &[0xde, 0xad, 0xbe, 0xef]);
         assert_eq!(packet.source_address().value(), 0x02);
@@ -607,6 +616,7 @@ mod test_std {
 
         let packet = reader
             .packet()
+            .expect("packet() must success")
             .expect("packet() must return Some after reading a packet");
         assert_eq!(packet.body().unwrap(), &[0xde, 0xad, 0xbe, 0xef]);
         assert_eq!(packet.source_address().value(), 0x02);
@@ -629,6 +639,7 @@ mod test_std {
 
         let packet = reader
             .packet()
+            .expect("packet() must success")
             .expect("packet() must return Some after reading a packet");
         assert_eq!(packet.body().unwrap(), &[0xde, 0xad, 0xbe, 0xef]);
         assert_eq!(packet.source_address().value(), 0x02);
@@ -654,6 +665,7 @@ mod test_std {
 
         let packet = reader
             .packet()
+            .expect("packet() must success")
             .expect("packet() must return Some after reading a packet");
         assert_eq!(packet.body().unwrap(), &[0xde, 0xad, 0xbe, 0xef]);
         assert_eq!(packet.source_address().value(), 0x02);
@@ -678,6 +690,7 @@ mod test_std {
 
         let packet = reader
             .packet()
+            .expect("packet() must success")
             .expect("packet() must return Some after reading a packet");
         assert_eq!(packet.body().unwrap(), &[0xde, 0xad, 0xbe, 0xef]);
         assert_eq!(packet.source_address().value(), 0x02);
@@ -705,6 +718,7 @@ mod test_std {
 
         let packet = reader
             .packet()
+            .expect("packet() must success")
             .expect("packet() must return Some after reading a packet");
         assert_eq!(packet.body().unwrap(), &[0xde, 0xad, 0xbe, 0xef]);
         assert_eq!(packet.source_address().value(), 0x02);

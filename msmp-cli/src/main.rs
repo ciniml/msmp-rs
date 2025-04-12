@@ -116,7 +116,8 @@ async fn command_send(args: SendCommandArgs, mut writer: SerialWrapper) -> anyho
     drop(packet_writer);
 
     if args.sync {
-        writer.write(&[0x00]).await.map_err(|err| anyhow!("Failed to write to serial port: {:?}", err))?;
+        // Send timimng synchronization byte before sending the frame
+        writer.write(&[0xf0 | source_address.value() & 0x0f, 0x00]).await.map_err(|err| anyhow!("Failed to write to serial port: {:?}", err))?;
     }
 
     let mut bytes_written = 0;

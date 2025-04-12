@@ -175,20 +175,29 @@ impl<const BUFFER_SIZE: usize, const BUFFER_COUNT: usize> Service<BUFFER_SIZE, B
     }
 
     pub async fn process<W: StreamWriterAsync, Handler: FnOnce(&mut BufferManager<BUFFER_SIZE, BUFFER_COUNT>, PacketReader<'_>) -> bool>(&mut self, writer: &mut W, handler: Handler) -> Result<bool, ServiceError<W::Error>> {
-        let buffer_to_forward = if let Some(packet) = self.reader.as_ref().map(|reader| reader.packet()).flatten() {
-            // A packet is received. process it.
-            let must_be_forwarded = handler(&mut self.buffer_manager, packet);
-            // Release the reader.
-            let reader = self.reader.take().unwrap();
-            let buffer = reader.release();
-            // If this packet must be forwarded, return the buffer for forwarding.
-            if must_be_forwarded {
-                Some(buffer)
-            } else {
+        let buffer_to_forward = match self.reader.as_ref().map(|reader| reader.packet()) {
+            Some(Ok(Some(packet))) => {
+                // A packet is received. process it.
+                let must_be_forwarded = handler(&mut self.buffer_manager, packet);
+                // Release the reader.
+                let reader = self.reader.take().unwrap();
+                let buffer = reader.release();
+                // If this packet must be forwarded, return the buffer for forwarding.
+                if must_be_forwarded {
+                    Some(buffer)
+                } else {
+                    None
+                }
+            },
+            Some(Err(_err)) => {
+                // An error occurred while reading the packet. Release the reader.
+                self.reader.take();
+                None
+            },
+            _ => {
+                // No packet is received. Nothing to do.
                 None
             }
-        } else {
-            None
         };
         
         if let Some(buffer_to_forward) = buffer_to_forward {
